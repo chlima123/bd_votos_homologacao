@@ -1,0 +1,310 @@
+{
+  "name": "Drive PDFs -> Extracao Votos -> Planilha XLSX",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Cron Diario",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [260, 320],
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "mode": "everyDay",
+              "hour": 7,
+              "minute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "12",
+      "name": "Garantir Pasta Temporaria",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [380, 320],
+      "parameters": {
+        "command": "mkdir -p /home/node/.n8n-files/votos"
+      }
+    },
+    {
+      "id": "2",
+      "name": "Listar PDFs da Pasta",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [500, 320],
+      "parameters": {
+        "resource": "fileFolder",
+        "operation": "search",
+        "searchMethod": "query",
+        "queryString": "'12X55vaaTQx-8xMu00Xmbo31rm18r80sK' in parents and mimeType = 'application/pdf' and trashed = false",
+        "returnAll": true,
+        "options": {
+          "fields": [
+            "id",
+            "name",
+            "createdTime",
+            "webViewLink"
+          ]
+        }
+      },
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "SEU_ID_CREDENCIAL_GOOGLE_DRIVE",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "id": "3",
+      "name": "Filtrar Incrementos (24h)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 320],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const now = Date.now();\nconst DAY_MS = 24 * 60 * 60 * 1000;\nconst WORKDIR = '/home/node/.n8n-files/votos';\n\nconst out = [];\nfor (const item of $input.all()) {\n  const id = item.json.id;\n  const name = item.json.name || '';\n  const created = item.json.createdTime ? new Date(item.json.createdTime).getTime() : 0;\n\n  if (!id || !name.toLowerCase().endsWith('.pdf')) continue;\n  if (!created || (now - created) > DAY_MS) continue;\n\n  out.push({\n    json: {\n      fileId: id,\n      fileName: name,\n      shortLink: `https://drive.google.com/file/d/${id}/view`,\n      pdfPath: `${WORKDIR}/votos_${id}.pdf`\n    }\n  });\n}\n\nreturn out;"
+      }
+    },
+    {
+      "id": "4",
+      "name": "Baixar PDF",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [920, 320],
+      "parameters": {
+        "resource": "file",
+        "operation": "download",
+        "fileId": "={{$json.fileId}}"
+      },
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "SEU_ID_CREDENCIAL_GOOGLE_DRIVE",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "id": "5",
+      "name": "Salvar PDF Temporario",
+      "type": "n8n-nodes-base.writeBinaryFile",
+      "typeVersion": 1,
+      "position": [1080, 320],
+      "parameters": {
+        "fileName": "={{$('Filtrar Incrementos (24h)').item.json.pdfPath}}",
+        "dataPropertyName": "data"
+      }
+    },
+    {
+      "id": "6",
+      "name": "Extrair Campos (Python)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1240, 320],
+      "parameters": {
+        "command": "={{'python3 /opt/n8n/scripts/extrair_votos_pdf.py extract --pdf \"' + $('Filtrar Incrementos (24h)').item.json.pdfPath + '\" --file-id \"' + $('Filtrar Incrementos (24h)').item.json.fileId + '\" --file-name \"' + (($('Filtrar Incrementos (24h)').item.json.fileName || '').replace(/\"/g, '\\\\\"')) + '\"'}}"
+      }
+    },
+    {
+      "id": "7",
+      "name": "Parsear JSON Extraido",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 320],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const toObject = (v) =>\n  v && typeof v === 'object' && !Array.isArray(v) ? v : { value: v };\n\nconst result = [];\n\nfor (const item of $input.all()) {\n  const raw = (item.json.stdout || '').trim();\n  if (!raw) continue;\n\n  const lines = raw.split('\\n').map(v => v.trim()).filter(Boolean);\n  if (!lines.length) continue;\n\n  let parsed;\n  try {\n    parsed = JSON.parse(lines[lines.length - 1]);\n  } catch (e) {\n    continue;\n  }\n\n  if (Array.isArray(parsed)) {\n    parsed.filter(v => v !== undefined).forEach(v => result.push({ json: toObject(v) }));\n  } else {\n    result.push({ json: toObject(parsed) });\n  }\n}\n\nreturn result;"
+      }
+    },
+    {
+      "id": "8",
+      "name": "Consolidar Registros",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 320],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// flatMap achata arrays caso o Python retorne multiplos registros por PDF\nconst rows = $input.all().flatMap(i => Array.isArray(i.json) ? i.json : [i.json]);\nif (!rows.length) return [];\n\nconst b64 = Buffer.from(JSON.stringify(rows), 'utf-8').toString('base64');\nconst stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');\nconst workdir = '/home/node/.n8n-files/votos';\n\nreturn [{\n  json: {\n    rowsB64: b64,\n    reportName: `planilha_votos_${stamp}.xlsx`,\n    reportPath: `${workdir}/planilha_votos_${stamp}.xlsx`\n  }\n}];"
+      }
+    },
+    {
+      "id": "9",
+      "name": "Gerar XLSX (Python)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1720, 320],
+      "parameters": {
+        "command": "={{'python3 /opt/n8n/scripts/extrair_votos_pdf.py build --rows-b64 \"' + $json.rowsB64 + '\" --output \"' + $json.reportPath + '\"'}}"
+      }
+    },
+    {
+      "id": "10",
+      "name": "Ler XLSX Gerado",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [1880, 320],
+      "parameters": {
+        "filePath": "={{$node['Consolidar Registros'].json.reportPath}}",
+        "dataPropertyName": "data"
+      }
+    },
+    {
+      "id": "11",
+      "name": "Upload XLSX para Pasta",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [2040, 320],
+      "parameters": {
+        "resource": "file",
+        "operation": "upload",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "name": "={{$node['Consolidar Registros'].json.reportName}}",
+        "parents": [
+          "12X55vaaTQx-8xMu00Xmbo31rm18r80sK"
+        ],
+        "options": {
+          "convert": false
+        }
+      },
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "SEU_ID_CREDENCIAL_GOOGLE_DRIVE",
+          "name": "Google Drive account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Cron Diario": {
+      "main": [
+        [
+          {
+            "node": "Garantir Pasta Temporaria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Garantir Pasta Temporaria": {
+      "main": [
+        [
+          {
+            "node": "Listar PDFs da Pasta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Listar PDFs da Pasta": {
+      "main": [
+        [
+          {
+            "node": "Filtrar Incrementos (24h)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrar Incrementos (24h)": {
+      "main": [
+        [
+          {
+            "node": "Baixar PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Baixar PDF": {
+      "main": [
+        [
+          {
+            "node": "Salvar PDF Temporario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salvar PDF Temporario": {
+      "main": [
+        [
+          {
+            "node": "Extrair Campos (Python)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extrair Campos (Python)": {
+      "main": [
+        [
+          {
+            "node": "Parsear JSON Extraido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parsear JSON Extraido": {
+      "main": [
+        [
+          {
+            "node": "Consolidar Registros",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consolidar Registros": {
+      "main": [
+        [
+          {
+            "node": "Gerar XLSX (Python)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gerar XLSX (Python)": {
+      "main": [
+        [
+          {
+            "node": "Ler XLSX Gerado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler XLSX Gerado": {
+      "main": [
+        [
+          {
+            "node": "Upload XLSX para Pasta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
