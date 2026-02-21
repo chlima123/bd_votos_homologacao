@@ -47,6 +47,60 @@ Workflow separado para:
 6. Execute manualmente uma vez e valide a planilha criada no Drive.
 7. Ative o workflow.
 
+## Funcionalidades do script Python (`extrair_votos_pdf.py`)
+
+O script expõe dois subcomandos via linha de comando:
+
+### Subcomando `extract`
+Extrai campos jurídicos de um único arquivo PDF e imprime um objeto JSON com os dados estruturados.
+
+```
+python extrair_votos_pdf.py extract --pdf <caminho_do_pdf> [--file-id <id_drive>] [--file-name <nome_original>]
+```
+
+**Etapas internas:**
+1. **Leitura do PDF** — todas as páginas são lidas com `pypdf` e o texto é concatenado, normalizando espaços e quebras de linha.
+2. **Extração de campos** — os seguintes campos são identificados no texto extraído:
+   - `NOME DO ARQUIVO`: nome original do arquivo (ou `--file-name` se informado).
+   - `PROMOTORIA DE JUSTICA`: primeira linha não vazia do documento.
+   - `NUMERO DO PROCEDIMENTO`: número no formato `NNNNN.NNN.NNN-NNNN` localizado na segunda linha ou em qualquer parte do texto.
+   - `TIPO DO PROCEDIMENTO`: identificado por expressões regulares que reconhecem *Inquérito Civil*, *Procedimento Preparatório*, *Notícia de Fato* e *Procedimento Administrativo / PA*.
+   - `OBJETO`: texto entre a segunda linha e o cabeçalho `RELATOR / RELATORA`.
+   - `RELATOR`: conteúdo após o cabeçalho `RELATOR` ou `RELATORA`.
+   - `EMENTA`: conteúdo após o cabeçalho `EMENTA`; caso não encontrado na mesma linha, extrai o bloco até o próximo cabeçalho relevante.
+   - `CASO EM EXAME`: parágrafo imediatamente após o cabeçalho `CASO EM EXAME` ou `CASO EXAMINADO`.
+   - `CONCLUSÃO DO RELATOR`: parágrafo imediatamente após o cabeçalho `CONCLUSAO DO RELATOR`.
+   - `NOME DO PROMOTOR DE JUSTIÇA QUE ARQUIVOU`: nome extraído por expressão regular que identifica "Promotor(a) de Justiça" seguido ou precedido de nome próprio.
+   - `DATA DE HOMOLOGAÇÃO`: data no formato `DD/MM/AAAA` localizada após as expressões "DATA DE HOMOLOGACAO" ou "HOMOLOGACAO EM".
+   - `LINK CURTO PARA O ARQUIVO`: URL `https://drive.google.com/file/d/<file-id>/view` montada a partir do parâmetro `--file-id`.
+3. **Saída JSON** — o registro é impresso em `stdout` como objeto JSON com chave para cada coluna.
+
+### Subcomando `build`
+Recebe uma lista de registros JSON (codificada em Base64) e gera uma planilha `.xlsx`.
+
+```
+python extrair_votos_pdf.py build --rows-b64 <lista_json_em_base64> --output <caminho_saida.xlsx>
+```
+
+**Etapas internas:**
+1. **Decodificação** — o argumento `--rows-b64` é decodificado de Base64 e interpretado como lista JSON.
+2. **Geração do XLSX** — uma planilha é criada com `openpyxl`; a primeira linha contém os cabeçalhos (colunas definidas em `COLUMNS`); as demais linhas recebem os valores de cada registro.
+3. **Ajuste automático de colunas** — a largura de cada coluna é ajustada ao conteúdo (mínimo 16, máximo 80 caracteres).
+4. **Saída** — o arquivo `.xlsx` é salvo no caminho indicado por `--output` e o caminho absoluto é impresso em `stdout`.
+
+### Utilitários internos
+| Função | Descrição |
+|---|---|
+| `read_pdf_text` | Extrai e normaliza o texto de todas as páginas do PDF. |
+| `non_empty_lines` | Divide o texto em linhas não vazias já normalizadas. |
+| `find_line_index` | Localiza o índice da linha que começa com um dos cabeçalhos informados (comparação sem acentos, case-insensitive). |
+| `extract_line_after_colon` | Retorna o valor após `:` na linha do cabeçalho, ou a linha seguinte. |
+| `paragraph_after_heading` | Retorna a linha imediatamente após o cabeçalho localizado. |
+| `extract_block_after_heading` | Extrai um bloco multilínea entre o cabeçalho e o próximo cabeçalho conhecido. |
+| `extract_first` | Aplica uma lista de expressões regulares e retorna o primeiro grupo capturado. |
+| `normalize_token` | Remove acentos e converte para maiúsculas para comparações robustas. |
+| `autosize_columns` | Ajusta a largura das colunas da planilha ao conteúdo. |
+
 ## Observacoes
 - O filtro de incremento usa janela de 24h (`Filtrar Incrementos (24h)`).
 - O parser depende do texto extraivel do PDF. PDFs escaneados sem OCR podem vir com campos vazios.
